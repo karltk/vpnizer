@@ -1,0 +1,51 @@
+#! /bin/bash
+
+NAME=$1
+
+cd /etc/openvpn/easy-rsa
+
+. ./vars
+export KEY_COUNTRY="NO"
+export KEY_PROVINCE="Oslo"
+export KEY_CITY="Oslo"
+export KEY_ORG="Boblycat"
+export KEY_EMAIL="keys@boblycat.org"
+export KEY_OU="Republic of Boblycat"
+export KEY_NAME="server"
+
+./pkitool $NAME
+
+cp /etc/openvpn/ca.crt client/$NAME.pem
+cp keys/$NAME.crt client/
+cp keys/$NAME.key client/
+
+cat << EOF > client/$NAME.fat.ovpn
+client
+dev tun
+proto udp
+resolv-retry infinite
+nobind
+user nobody
+group nogroup
+persist-key
+persist-tun
+comp-lzo
+verb 3
+remote SERVER_IP 1194
+EOF
+
+echo "<ca>" >> client/$NAME.fat.ovpn
+cat client/$NAME.pem >> client/$NAME.fat.ovpn
+echo "</ca>" >> client/$NAME.fat.ovpn
+
+echo "<cert>" >> client/$NAME.fat.ovpn
+cat client/$NAME.crt >> client/$NAME.fat.ovpn
+echo "</cert>" >> client/$NAME.fat.ovpn
+
+echo "<key>" >> client/$NAME.fat.ovpn
+cat client/$NAME.key >> client/$NAME.fat.ovpn
+echo "</key>" >> client/$NAME.fat.ovpn
+
+cd /etc/openvpn/easy-rsa
+
+echo "OVPN file in `pwd`/client/$NAME.fat.ovpn" 

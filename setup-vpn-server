@@ -1,0 +1,100 @@
+#! /bin/bash -x
+
+# heavily inspired by https://www.digitalocean.com/community/tutorials/how-to-set-up-an-openvpn-server-on-ubuntu-14-04
+
+apt-get update
+apt-get install -y openvpn easy-rsa
+
+gunzip -c /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > /etc/openvpn/server.conf
+sed "s|dh dh1024.pem|dh dh2048.pem|g" -i /etc/openvpn/server.conf
+echo "push \"redirect-gateway def1 bypass-dhcp\"" >> /etc/openvpn/server.conf
+echo "push \"dhcp-option DNS 208.67.222.222\"" >> /etc/openvpn/server.conf
+echo "push \"dhcp-option DNS 208.67.220.220\"" >> /etc/openvpn/server.conf
+echo "user nobody" >> /etc/openvpn/server.conf
+echo "group nogroup" >> /etc/openvpn/server.conf
+
+echo 1 > /proc/sys/net/ipv4/ip_forward
+sed "s|#net.ipv6.conf.all.forwarding=1|net.ipv6.conf.all.forwarding=1|" -i /etc/sysctl.conf
+
+ufw allow ssh
+ufw allow 1194/udp
+
+sed "s|DEFAULT_FORWARD_POLICY=.*|DEFAULT_FORWARD_POLICY=\"ACCEPT\"|" -i /etc/default/ufw
+
+# FIXME support multiple setup calls
+cat << EOF >> /etc/ufw/before.rules
+# START OPENVPN RULES
+# NAT table rules
+*nat
+:POSTROUTING ACCEPT [0:0] 
+# Allow traffic from OpenVPN client to eth0
+-A POSTROUTING -s 10.8.0.0/8 -o eth0 -j MASQUERADE
+COMMIT
+# END OPENVPN RULES
+EOF
+
+yes | ufw enable
+
+mkdir -p /tmp/vpnlog
+ufw status > /tmp/vpnlog/01-status
+
+# configure and build certificate authority
+
+rm -rf /etc/openvpn/easy-rsa
+cp -r /usr/share/easy-rsa/ /etc/openvpn
+mkdir /etc/openvpn/easy-rsa/keys
+
+openssl dhparam -out /etc/openvpn/dh2048.pem 2048
+
+cd /etc/openvpn/easy-rsa
+
+. ./vars
+export KEY_COUNTRY="NO"
+export KEY_PROVINCE="Oslo"
+export KEY_CITY="Oslo"
+export KEY_ORG="Boblycat"
+export KEY_EMAIL="keys@boblycat.org"
+export KEY_OU="Republic of Boblycat"
+export KEY_NAME="server"
+
+./clean-all
+./pkitool --initca
+./pkitool --server server
+
+cp /etc/openvpn/easy-rsa/keys/{server.crt,server.key,ca.crt} /etc/openvpn
+
+ls /etc/openvpn > /tmp/vpnlog/02-etc-openvpn
+
+service openvpn start
+
+service openvpn status > /tmp/vpnlog/03-openvpn-status
+
+# generate client certificate
+
+mkdir -p client
+
+NAME=client1
+
+./pkitool $NAME
+
+cat << EOF > client/$NAME.lean.ovpn
+client
+dev tun
+proto udp
+resolv-retry infinite
+nobind
+user nobody
+group nogroup
+persist-key
+persist-tun
+comp-lzo
+verb 3
+remote $SERVER_IP 1194
+ca $NAME.ca.crt
+cert $NAME.crt
+key $NAME.key
+EOF
+
+
+
+
