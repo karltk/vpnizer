@@ -95,6 +95,6 @@ cert $NAME.crt
 key $NAME.key
 EOF
 
-
-
+cp keys/$NAME.{crt,key} client/
+cp keys/ca.crt client/$NAME.ca.crt
 
