@@ -2,82 +2,109 @@
 
 # heavily inspired by https://www.digitalocean.com/community/tutorials/how-to-set-up-an-openvpn-server-on-ubuntu-14-04
 
-apt-get update
-apt-get install -y openvpn easy-rsa
+function ensure_status_dir() {
+    mkdir -p /tmp/vpnlog/
+}
 
-gunzip -c /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > /etc/openvpn/server.conf
-sed "s|dh dh1024.pem|dh dh2048.pem|g" -i /etc/openvpn/server.conf
-echo "push \"redirect-gateway def1 bypass-dhcp\"" >> /etc/openvpn/server.conf
-echo "push \"dhcp-option DNS 208.67.222.222\"" >> /etc/openvpn/server.conf
-echo "push \"dhcp-option DNS 208.67.220.220\"" >> /etc/openvpn/server.conf
-echo "user nobody" >> /etc/openvpn/server.conf
-echo "group nogroup" >> /etc/openvpn/server.conf
+function install_packages() {
+    apt-get update
+    apt-get install -y openvpn easy-rsa ufw
+    touch /tmp/vpnlog/00-installed-packages
+}
 
-echo 1 > /proc/sys/net/ipv4/ip_forward
-sed "s|#net.ipv6.conf.all.forwarding=1|net.ipv6.conf.all.forwarding=1|" -i /etc/sysctl.conf
+function configure_openvpn() {
+    gunzip -c /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > /etc/openvpn/server.conf
+    sed "s|dh dh1024.pem|dh dh2048.pem|g" -i /etc/openvpn/server.conf
+    cat << EOF >> /etc/openvpn/server.conf
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+user nobody
+group nogroup
+log-append /var/log/openvpn.log
+EOF
 
-ufw allow ssh
-ufw allow 1194/udp
+    touch /tmp/vpnlog/01-configured-openvpn
+}
 
-sed "s|DEFAULT_FORWARD_POLICY=.*|DEFAULT_FORWARD_POLICY=\"ACCEPT\"|" -i /etc/default/ufw
+function configure_forwarding() {
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    sed "s|#net.ipv6.conf.all.forwarding=1|net.ipv6.conf.all.forwarding=1|" -i /etc/sysctl.conf
 
-# FIXME support multiple setup calls
-cat << EOF >> /etc/ufw/before.rules
+    yes | ufw reset
+    ufw allow ssh/tcp
+    ufw allow http/tcp
+    ufw allow https/tcp
+    ufw allow 1194/udp
+    ufw allow out 53/udp
+
+    sed "s|DEFAULT_FORWARD_POLICY=.*|DEFAULT_FORWARD_POLICY=\"ACCEPT\"|" -i /etc/default/ufw
+
+    # FIXME support multiple setup calls
+    cat << EOF >> /etc/ufw/before.rules
 # START OPENVPN RULES
 # NAT table rules
 *nat
-:POSTROUTING ACCEPT [0:0] 
+:POSTROUTING ACCEPT [0:0]
 # Allow traffic from OpenVPN client to eth0
 -A POSTROUTING -s 10.8.0.0/8 -o eth0 -j MASQUERADE
 COMMIT
 # END OPENVPN RULES
 EOF
 
-yes | ufw enable
+    yes | ufw enable
 
-mkdir -p /tmp/vpnlog
-ufw status > /tmp/vpnlog/01-status
+    mkdir -p /tmp/vpnlog
+    ufw status > /tmp/vpnlog/02-ufw-status
+}
 
-# configure and build certificate authority
+function generate_server_certs() {
 
-rm -rf /etc/openvpn/easy-rsa
-cp -r /usr/share/easy-rsa/ /etc/openvpn
-mkdir /etc/openvpn/easy-rsa/keys
+    # configure and build certificate authority
 
-openssl dhparam -out /etc/openvpn/dh2048.pem 2048
+    rm -rf /etc/openvpn/easy-rsa
+    cp -r /usr/share/easy-rsa/ /etc/openvpn
+    mkdir /etc/openvpn/easy-rsa/keys
 
-cd /etc/openvpn/easy-rsa
+    openssl dhparam -out /etc/openvpn/dh2048.pem 2048
 
-. ./vars
-export KEY_COUNTRY="NO"
-export KEY_PROVINCE="Oslo"
-export KEY_CITY="Oslo"
-export KEY_ORG="Boblycat"
-export KEY_EMAIL="keys@boblycat.org"
-export KEY_OU="Republic of Boblycat"
-export KEY_NAME="server"
+    cd /etc/openvpn/easy-rsa
 
-./clean-all
-./pkitool --initca
-./pkitool --server server
+    . ./vars
+    export KEY_COUNTRY="NO"
+    export KEY_PROVINCE="Oslo"
+    export KEY_CITY="Oslo"
+    export KEY_ORG="Boblycat"
+    export KEY_EMAIL="keys@boblycat.org"
+    export KEY_OU="Republic of Boblycat"
+    export KEY_NAME="server"
 
-cp /etc/openvpn/easy-rsa/keys/{server.crt,server.key,ca.crt} /etc/openvpn
+    ./clean-all
+    ./pkitool --initca
+    ./pkitool --server server
 
-ls /etc/openvpn > /tmp/vpnlog/02-etc-openvpn
+    cp /etc/openvpn/easy-rsa/keys/{server.crt,server.key,ca.crt} /etc/openvpn
 
-service openvpn start
+    ls /etc/openvpn > /tmp/vpnlog/03-server-certs
+}
 
-service openvpn status > /tmp/vpnlog/03-openvpn-status
+function start_openvpn() {
 
-# generate client certificate
+    service openvpn start
 
-mkdir -p client
+    service openvpn status > /tmp/vpnlog/04-openvpn-status
+}
 
-NAME=client1
+function generate_client_certs() {
 
-./pkitool $NAME
+    # generate client certificate
 
-cat << EOF > client/$NAME.lean.ovpn
+    mkdir -p client
+
+    NAME=client1
+
+    ./pkitool $NAME
+
+    cat << EOF > client/$NAME.lean.ovpn
 client
 dev tun
 proto udp
@@ -95,6 +122,39 @@ cert $NAME.crt
 key $NAME.key
 EOF
 
-cp keys/$NAME.{crt,key} client/
-cp keys/ca.crt client/$NAME.ca.crt
+    cp keys/$NAME.{crt,key} client/
+    cp keys/ca.crt client/$NAME.ca.crt
 
+    touch /tmp/vpnlog/05-client-certs
+}
+
+if [[ -z "$SERVER_IP" ]] ; then
+    echo "!!! Must set env var SERVER_IP to indicate public IP before start" > /dev/stderr
+    exit 1
+fi
+
+ensure_status_dir
+
+if [[ ! -e /tmp/vpnlog/00-installed-packages ]] ; then
+    install_packages
+fi
+
+if [[ ! -e /etc/openvpn/01-configured-openvpn ]] ; then
+    configure_openvpn
+fi
+
+if [[ ! -e /tmp/vpnlog/02-ufw-status ]]; then
+    configure_forwarding
+fi
+
+if [[ ! -e /tmp/vpnlog/03-server-certs ]]; then
+    generate_server_certs
+fi
+
+if [[ ! -e /tmp/vpnlog/04-openvpn-status ]]; then
+    start_openvpn
+fi
+
+if [[ ! -e /tmp/vpnlog/05-client-certs ]]; then
+    generate_client_certs
+fi
